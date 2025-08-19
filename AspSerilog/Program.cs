@@ -25,6 +25,10 @@ var columnOptions = new ColumnOptions
 };
 
 // ==== 2. Configure Serilog ====
+var cc = builder.Configuration.GetConnectionString("LogDatabase");
+Console.WriteLine("=============================================================");
+Console.WriteLine(cc);
+Console.WriteLine("=============================================================");
 Log.Logger = new LoggerConfiguration()
     .Enrich.FromLogContext()
     .Enrich.WithMachineName()
@@ -33,13 +37,18 @@ Log.Logger = new LoggerConfiguration()
     .Enrich.WithProperty("Environment", builder.Environment.EnvironmentName)
     .WriteTo.Console()
     .WriteTo.MSSqlServer(
-        connectionString: "Your connection string",
-        tableName: "Logs",
-        autoCreateSqlTable: true, // change to true if table should be created
+        connectionString: builder.Configuration.GetConnectionString("LogDatabase"),
+        sinkOptions: new MSSqlServerSinkOptions
+        {
+            TableName = "Logs",
+            AutoCreateSqlTable = true,
+            BatchPostingLimit = 100,  // Bulk insert after 100 logs
+            BatchPeriod = TimeSpan.FromSeconds(5),  // Max wait time
+            EagerlyEmitFirstEvent = false  // Always wait for batch
+        },
         columnOptions: columnOptions
     )
     .CreateLogger();
-
 // Hook Serilog into the host
 builder.Host.UseSerilog();
 
@@ -60,15 +69,18 @@ app.Use(async (context, next) =>
     using (LogContext.PushProperty("RequestPath", context.Request.Path))
     using (LogContext.PushProperty("ClientIP", context.Connection.RemoteIpAddress?.ToString() ?? "Unknown"))
     using (LogContext.PushProperty("UserAgent", context.Request.Headers["User-Agent"].ToString()))
-    using (LogContext.PushProperty("OperationName", "UnknownOperation"))
+    using (LogContext.PushProperty("OperationName", context.Request.Path.Value?.Split('/').LastOrDefault() ?? "Unknown"))
     {
         await next();
 
         stopwatch.Stop();
         LogContext.PushProperty("ExecutionTimeMs", stopwatch.ElapsedMilliseconds);
         Log.Information("Request completed in {ExecutionTimeMs} ms", stopwatch.ElapsedMilliseconds);
+        Log.ForContext("ExecutionTimeMs", stopwatch.ElapsedMilliseconds)
+              .Information("Request completed in {ExecutionTimeMs} ms");
     }
 });
+
 
 // ==== 4. Swagger & HTTPS ====
 if (app.Environment.IsDevelopment())
